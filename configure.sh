@@ -21,4 +21,4 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
 os.chmod(sys.argv[1], 0o600)
 PY
 echo "Configuración guardada en $config_dir/config.json"
-echo "Vuelve a abrir Flux para conectar CaixaBank."
+echo "Vuelve a abrir Flux para elegir un banco español disponible."

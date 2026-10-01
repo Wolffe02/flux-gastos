@@ -1,0 +1,24 @@
+name: Flux
+options:
+  bundleIdPrefix: com.wolffe02
+  deploymentTarget:
+    iOS: '16.0'
+targets:
+  Flux:
+    type: application
+    platform: iOS
+    sources:
+      - path: Flux
+        excludes: [Info.plist]
+    info:
+      path: Flux/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.wolffe02.fluxgastos
+        PRODUCT_NAME: Flux
+        INFOPLIST_KEY_CFBundleDisplayName: Flux
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Flux/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: '5.0'
+        TARGETED_DEVICE_FAMILY: '1,2'

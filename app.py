@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local Debian app and read-only Enable Banking connector for CaixaBank."""
+"""Local Flux app and read-only Enable Banking connector for Spanish banks."""
 from __future__ import annotations
 
 import base64
@@ -14,6 +14,7 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -22,17 +23,25 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 HOST, PORT = "127.0.0.1", 8765
-CONFIG_BASE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-DATA_BASE = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+if os.name == "nt":
+    CONFIG_BASE = Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
+    DATA_BASE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+elif sys.platform == "darwin":
+    CONFIG_BASE = DATA_BASE = Path.home() / "Library/Application Support"
+else:
+    CONFIG_BASE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    DATA_BASE = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
 CONFIG_DIR = CONFIG_BASE / ("claro-gastos" if not (CONFIG_BASE / "flux-gastos").exists() and (CONFIG_BASE / "claro-gastos").exists() else "flux-gastos")
 DATA_DIR = DATA_BASE / ("claro-gastos" if not (DATA_BASE / "flux-gastos").exists() and (DATA_BASE / "claro-gastos").exists() else "flux-gastos")
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DB_FILE = DATA_DIR / "gastos.sqlite3"
 API = "https://api.enablebanking.com"
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 LOCK = threading.Lock()
 PENDING_STATE: str | None = None
+PENDING_BANK: str | None = None
 
 
 def db():
@@ -40,6 +49,8 @@ def db():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, accounts TEXT NOT NULL, expires TEXT)")
+    if "bank_name" not in {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}:
+        conn.execute("ALTER TABLE sessions ADD COLUMN bank_name TEXT")
     conn.execute("CREATE TABLE IF NOT EXISTS transactions (key TEXT PRIMARY KEY, account TEXT, date TEXT, description TEXT, amount REAL, currency TEXT, pending INTEGER DEFAULT 0)")
     return conn
 
@@ -64,8 +75,29 @@ def jwt_token(cfg):
     header = b64(json.dumps({"typ": "JWT", "alg": "RS256", "kid": cfg["application_id"]}, separators=(",", ":")).encode())
     payload = b64(json.dumps({"iss": "enablebanking.com", "aud": "api.enablebanking.com", "iat": now, "exp": now + 300}, separators=(",", ":")).encode())
     signing = f"{header}.{payload}".encode()
-    proc = subprocess.run(["openssl", "dgst", "-sha256", "-sign", cfg["private_key_path"]], input=signing, capture_output=True, check=True)
-    return f"{header}.{payload}.{b64(proc.stdout)}"
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+        private_key = serialization.load_pem_private_key(Path(cfg["private_key_path"]).read_bytes(), password=None)
+        signature = private_key.sign(signing, padding.PKCS1v15(), hashes.SHA256())
+    except ImportError:
+        try:
+            proc = subprocess.run(["openssl", "dgst", "-sha256", "-sign", cfg["private_key_path"]], input=signing, capture_output=True, check=True)
+            signature = proc.stdout
+        except FileNotFoundError as exc:
+            raise RuntimeError("Instala las dependencias de requirements.txt para conectar tu banco en este sistema.") from exc
+    return f"{header}.{payload}.{b64(signature)}"
+
+
+def spanish_banks():
+    response = api("GET", "/aspsps", query={"country": "ES", "service": "AIS", "psu_type": "personal"})
+    items = response if isinstance(response, list) else response.get("aspsps", [])
+    banks = []
+    for item in items:
+        name = item.get("name")
+        if name:
+            banks.append({"name": str(name), "country": str(item.get("country") or "ES")})
+    return sorted(banks, key=lambda bank: bank["name"].casefold())
 
 
 def api(method, path, body=None, query=None):
@@ -118,7 +150,7 @@ def to_transactions(account_id, response):
     return result
 
 
-def import_transactions(session):
+def import_transactions(session, bank_name="Banco"):
     conn = db()
     count = 0
     for account in session.get("accounts", []):
@@ -130,11 +162,21 @@ def import_transactions(session):
         if not account_id:
             continue
         from_date = (dt.date.today() - dt.timedelta(days=180)).isoformat()
-        page = api("GET", f"/accounts/{urllib.parse.quote(str(account_id), safe='')}/transactions", query={"date_from": from_date, "transaction_status": "BOOK"})
-        for item in to_transactions(str(account_id), page):
-            conn.execute("INSERT OR REPLACE INTO transactions(key,account,date,description,amount,currency,pending) VALUES(:key,:account,:date,:description,:amount,:currency,:pending)", item)
-            count += 1
-    conn.execute("INSERT OR REPLACE INTO sessions(id, accounts, expires) VALUES(?,?,?)", (session["session_id"], json.dumps(session.get("accounts_data", session.get("accounts", []))), (session.get("access") or {}).get("valid_until")))
+        continuation = None
+        seen = set()
+        while True:
+            query = {"date_from": from_date, "transaction_status": "BOOK"}
+            if continuation:
+                query["continuation_key"] = continuation
+            page = api("GET", f"/accounts/{urllib.parse.quote(str(account_id), safe='')}/transactions", query=query)
+            for item in to_transactions(str(account_id), page):
+                conn.execute("INSERT OR REPLACE INTO transactions(key,account,date,description,amount,currency,pending) VALUES(:key,:account,:date,:description,:amount,:currency,:pending)", item)
+                count += 1
+            continuation = page.get("continuation_key")
+            if not continuation or continuation in seen:
+                break
+            seen.add(continuation)
+        conn.execute("INSERT OR REPLACE INTO sessions(id, accounts, expires, bank_name) VALUES(?,?,?,?)", (session["session_id"], json.dumps(session.get("accounts_data", session.get("accounts", []))), (session.get("access") or {}).get("valid_until"), bank_name))
     conn.commit()
     conn.close()
     return count
@@ -204,14 +246,19 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length) or b"{}")
 
     def do_GET(self):
-        global PENDING_STATE
+        global PENDING_STATE, PENDING_BANK
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/status":
             conn = db()
-            session = conn.execute("SELECT id,expires FROM sessions ORDER BY rowid DESC LIMIT 1").fetchone()
+            session = conn.execute("SELECT id,expires,bank_name FROM sessions ORDER BY rowid DESC LIMIT 1").fetchone()
             txn_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
             conn.close()
-            return self.send_json(200, {"configured": config() is not None, "connected": session is not None, "expires": session["expires"] if session else None, "transactionCount": txn_count})
+            return self.send_json(200, {"configured": config() is not None, "connected": session is not None, "bankName": session["bank_name"] if session else None, "expires": session["expires"] if session else None, "transactionCount": txn_count})
+        if parsed.path == "/api/banks":
+            try:
+                return self.send_json(200, {"items": spanish_banks()})
+            except Exception as exc:
+                return self.send_json(400, {"error": str(exc)})
         if parsed.path == "/api/recurring":
             return self.send_json(200, {"items": recurring_summary()})
         if parsed.path == "/api/monthly":
@@ -228,16 +275,18 @@ class Handler(BaseHTTPRequestHandler):
             error = params.get("error_description", params.get("error", [None]))[0]
             with LOCK:
                 expected = PENDING_STATE
+                bank_name = PENDING_BANK
                 PENDING_STATE = None
+                PENDING_BANK = None
             if error or not code or not expected or not secrets.compare_digest(state or "", expected):
                 message = "La autorización se canceló o no coincidió el estado. Puedes volver a intentarlo desde la aplicación."
                 if error:
-                    message = "CaixaBank no completó la autorización. Vuelve a intentarlo desde la aplicación."
+                    message = "El banco no completó la autorización. Vuelve a intentarlo desde la aplicación."
                 return self.page_response("Conexión no completada", message)
             try:
                 session = api("POST", "/sessions", {"code": code})
-                n = import_transactions(session)
-                return self.page_response("CaixaBank conectado", f"Autorización completada. Se han importado {n} movimientos. Ya puedes volver a Flux.")
+                n = import_transactions(session, bank_name or "Banco")
+                return self.page_response("Banco conectado", f"Autorización completada. Se han importado {n} movimientos de {html.escape(bank_name or 'tu banco')}. Ya puedes volver a Flux.")
             except Exception as exc:
                 return self.page_response("No se pudieron importar los movimientos", str(exc))
         path = "/index.html" if parsed.path == "/" else parsed.path
@@ -261,32 +310,67 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_POST(self):
-        global PENDING_STATE
+        global PENDING_STATE, PENDING_BANK
         origin = self.headers.get("Origin")
         if origin and origin != f"http://{HOST}:{PORT}":
             return self.send_json(403, {"error": "Origen de solicitud no permitido."})
+        if self.path == "/api/configure":
+            try:
+                settings = self.read_json()
+                app_id = str(settings.get("applicationId", "")).strip()
+                key_data = base64.b64decode(settings.get("privateKey", ""), validate=True)
+                if not app_id or len(app_id) > 250 or len(key_data) > 16000 or b"PRIVATE KEY-----" not in key_data[:100]:
+                    return self.send_json(400, {"error": "Introduce un Application ID y una clave privada RSA PEM válida."})
+                try:
+                    from cryptography.hazmat.primitives import serialization
+                    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+                    private_key = serialization.load_pem_private_key(key_data, password=None)
+                    if not isinstance(private_key, RSAPrivateKey):
+                        return self.send_json(400, {"error": "La clave debe ser RSA. Enable Banking no admite esta clave."})
+                except ImportError:
+                    subprocess.run(["openssl", "rsa", "-noout"], input=key_data, capture_output=True, check=True)
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                key_path = CONFIG_DIR / "enablebanking.pem"
+                key_path.write_bytes(key_data)
+                if os.name != "nt":
+                    CONFIG_DIR.chmod(0o700)
+                    key_path.chmod(0o600)
+                temp_config = CONFIG_FILE.with_suffix(".tmp")
+                temp_config.write_text(json.dumps({"application_id": app_id, "private_key_path": str(key_path)}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                temp_config.replace(CONFIG_FILE)
+                if os.name != "nt":
+                    CONFIG_FILE.chmod(0o600)
+                return self.send_json(200, {"configured": True})
+            except (ValueError, TypeError, OSError, subprocess.CalledProcessError) as exc:
+                detail = "La clave PEM no es válida o no se pudo guardar."
+                if isinstance(exc, FileNotFoundError):
+                    detail = "Instala las dependencias de requirements.txt o OpenSSL y vuelve a intentarlo."
+                return self.send_json(400, {"error": detail})
         if self.path == "/api/connect":
             try:
+                selection = self.read_json()
+                selected_name = str(selection.get("name", "")).strip()
+                if not selected_name:
+                    return self.send_json(400, {"error": "Elige primero tu banco."})
+                bank = next((item for item in spanish_banks() if item["name"] == selected_name), None)
+                if not bank:
+                    return self.send_json(400, {"error": "El banco ya no aparece disponible. Actualiza la lista e inténtalo de nuevo."})
                 state = secrets.token_urlsafe(32)
                 valid_until = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=80)).replace(microsecond=0).isoformat()
-                aspsps = api("GET", "/aspsps", query={"country": "ES", "service": "AIS", "psu_type": "personal"})
-                items = aspsps if isinstance(aspsps, list) else aspsps.get("aspsps", [])
-                bank = next((a for a in items if "caixabank" in str(a.get("name", "")).casefold()), None)
-                if not bank:
-                    return self.send_json(404, {"error": "Enable Banking no ofrece CaixaBank en su lista actual de conexiones para cuentas personales."})
-                body = {"access": {"valid_until": valid_until, "transactions": True}, "aspsp": {"name": bank["name"], "country": "ES"}, "state": state, "redirect_url": f"http://{HOST}:{PORT}/callback", "psu_type": "personal", "language": "es"}
+                body = {"access": {"valid_until": valid_until, "transactions": True}, "aspsp": {"name": bank["name"], "country": bank["country"]}, "state": state, "redirect_url": f"http://{HOST}:{PORT}/callback", "psu_type": "personal", "language": "es"}
                 result = api("POST", "/auth", body)
                 with LOCK:
                     PENDING_STATE = state
+                    PENDING_BANK = bank["name"]
                 return self.send_json(200, {"url": result["url"]})
             except Exception as exc:
                 return self.send_json(400, {"error": str(exc)})
         if self.path == "/api/sync":
             conn = db()
             row = conn.execute("SELECT id,accounts,expires FROM sessions ORDER BY rowid DESC LIMIT 1").fetchone()
-            conn.close()
             if not row:
-                return self.send_json(400, {"error": "Primero conecta CaixaBank."})
+                conn.close()
+                return self.send_json(400, {"error": "Primero conecta una cuenta bancaria."})
             try:
                 accounts_data = json.loads(row["accounts"])
                 ids = []
@@ -294,17 +378,30 @@ class Handler(BaseHTTPRequestHandler):
                     if isinstance(x, str): ids.append(x)
                     elif x.get("uid"): ids.append(x["uid"])
                     elif x.get("account_id"): ids.append(x["account_id"])
+                    elif x.get("resource_id"): ids.append(x["resource_id"])
                 n = 0
                 for aid in ids:
                     from_date = (dt.date.today() - dt.timedelta(days=180)).isoformat()
-                    page = api("GET", f"/accounts/{urllib.parse.quote(aid, safe='')}/transactions", query={"date_from": from_date, "transaction_status": "BOOK"})
-                    for item in to_transactions(aid, page):
-                        conn = db()
-                        conn.execute("INSERT OR REPLACE INTO transactions(key,account,date,description,amount,currency,pending) VALUES(:key,:account,:date,:description,:amount,:currency,:pending)", item)
-                        conn.commit(); conn.close(); n += 1
+                    continuation = None
+                    seen = set()
+                    while True:
+                        query = {"date_from": from_date, "transaction_status": "BOOK"}
+                        if continuation:
+                            query["continuation_key"] = continuation
+                        page = api("GET", f"/accounts/{urllib.parse.quote(str(aid), safe='')}/transactions", query=query)
+                        for item in to_transactions(str(aid), page):
+                            conn.execute("INSERT OR REPLACE INTO transactions(key,account,date,description,amount,currency,pending) VALUES(:key,:account,:date,:description,:amount,:currency,:pending)", item)
+                            n += 1
+                        continuation = page.get("continuation_key")
+                        if not continuation or continuation in seen:
+                            break
+                        seen.add(continuation)
+                conn.commit()
                 return self.send_json(200, {"count": n})
             except Exception as exc:
                 return self.send_json(400, {"error": str(exc)})
+            finally:
+                conn.close()
         if self.path == "/api/disconnect":
             conn = db()
             row = conn.execute("SELECT id FROM sessions ORDER BY rowid DESC LIMIT 1").fetchone()
@@ -326,10 +423,23 @@ def main():
     os.umask(0o077)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_DIR.chmod(0o700); DATA_DIR.chmod(0o700)
-    if DB_FILE.exists(): DB_FILE.chmod(0o600)
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    if os.name != "nt":
+        CONFIG_DIR.chmod(0o700); DATA_DIR.chmod(0o700)
+        if DB_FILE.exists(): DB_FILE.chmod(0o600)
     url = f"http://{HOST}:{PORT}/"
+    try:
+        server = ThreadingHTTPServer((HOST, PORT), Handler)
+    except OSError as exc:
+        try:
+            with urllib.request.urlopen(url + "api/status", timeout=1) as response:
+                status = json.loads(response.read())
+            if not {"configured", "connected", "transactionCount"}.issubset(status):
+                raise ValueError("El servicio no es una instancia de Flux.")
+            webbrowser.open(url)
+            print("Flux ya estaba abierto; se ha enfocado su panel.")
+            return
+        except Exception:
+            raise SystemExit("No se puede iniciar Flux: el puerto 8765 está ocupado. Cierra la app que lo está usando y vuelve a intentarlo.") from exc
     print("Flux está disponible en", url)
     threading.Timer(0.7, lambda: webbrowser.open(url)).start()
     try:

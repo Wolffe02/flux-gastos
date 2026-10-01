@@ -7,3 +7,15 @@ __pycache__/
 .env
 config.json
 .DS_Store
+.venv/
+dist/
+*.spec
+flux.iconset/
+flux.icns
+**/build/
+**/target/
+**/.gradle/
+native/ios/Flux.xcodeproj/
+native/android/app/src/main/assets/public/
+native/ios/Flux/public/
+native/windows/web/

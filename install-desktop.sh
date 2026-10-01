@@ -7,9 +7,9 @@ cat > "$apps_dir/flux.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Flux
-Comment=Visualiza tus pagos mensuales y movimientos de CaixaBank
+Comment=Visualiza tus gastos y pagos bancarios recurrentes
 Exec="$app_dir/run.sh"
-Icon=utilities-finance
+Icon="$app_dir/icons/flux-192.png"
 Terminal=true
 Categories=Office;Finance;
 DESKTOP

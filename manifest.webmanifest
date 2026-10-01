@@ -1,0 +1,17 @@
+{
+  "id": "./",
+  "name": "Flux · Gastos mensuales",
+  "short_name": "Flux",
+  "description": "Organiza y visualiza tus gastos mensuales.",
+  "lang": "es-ES",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#081117",
+  "theme_color": "#081117",
+  "categories": ["finance", "utilities"],
+  "icons": [
+    {"src": "./icons/flux-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "./icons/flux-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}
+  ]
+}
