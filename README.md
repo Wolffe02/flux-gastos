@@ -1,6 +1,6 @@
 # Flux
 
-Flux organiza los gastos mensuales en suscripciones, recibos y pagos recurrentes, con una interfaz cyberpunk sencilla.
+Flux es una app multiplataforma para organizar gastos mensuales en suscripciones, recibos y pagos recurrentes, con una interfaz cyberpunk sencilla. Está disponible como web/PWA, Android, Windows, macOS, iOS y Linux; desde las apps de escritorio permite conectar bancos españoles disponibles en Enable Banking.
 
 ## Plataformas
 
@@ -9,7 +9,7 @@ Flux organiza los gastos mensuales en suscripciones, recibos y pagos recurrentes
 - **Aplicación Windows:** el flujo **Build desktop apps** genera `Flux.exe` con el servidor local incluido. Permite conectar bancos sin subir la clave privada ni los movimientos a un servidor remoto.
 - **Aplicación macOS:** el mismo flujo genera `Flux.app` empaquetada en `Flux-macOS.zip`.
 - **Aplicación nativa iOS:** el flujo móvil genera una compilación para el simulador de Xcode. Para instalar y distribuir una app nativa en iPhone se requiere firma de Apple; la PWA anterior sí se puede instalar en el iPhone sin esa firma.
-- **Debian 13:** conserva la aplicación local de escritorio, que también puede conectar los bancos españoles que aparezcan disponibles en Enable Banking.
+- **Linux, incluido Debian 13:** ejecuta la aplicación local de escritorio. El conector admite los bancos españoles disponibles en Enable Banking.
 
 Las entradas manuales se guardan localmente en cada dispositivo y no se sincronizan entre ellos.
 
