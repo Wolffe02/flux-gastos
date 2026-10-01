@@ -1,5 +1,7 @@
 # Flux
 
+Consulta la [política de privacidad](https://wolffe02.github.io/flux-gastos/privacidad.html) y las [condiciones de uso](https://wolffe02.github.io/flux-gastos/condiciones.html).
+
 Flux es una app multiplataforma para organizar gastos mensuales en suscripciones, recibos y pagos recurrentes, con una interfaz cyberpunk sencilla. Está disponible como web/PWA, Android, Windows, macOS, iOS y Linux; desde las apps de escritorio permite conectar bancos españoles disponibles en Enable Banking.
 
 ## Plataformas
