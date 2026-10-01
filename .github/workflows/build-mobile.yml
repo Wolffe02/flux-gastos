@@ -14,12 +14,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
       - name: Install Android SDK platform
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
       - name: Bundle Flux web app
         run: ./sync-native-web-assets.sh
       - name: Build debug APK
@@ -38,7 +39,7 @@ jobs:
       - name: Generate Xcode project
         run: |
           brew install xcodegen
-          xcodegen generate --spec native/ios/project.yml --project native/ios/Flux.xcodeproj
+          xcodegen generate --spec native/ios/project.yml --project native/ios
       - name: Build iOS Simulator app
         run: xcodebuild -project native/ios/Flux.xcodeproj -scheme Flux -sdk iphonesimulator -configuration Release -derivedDataPath native/ios/build CODE_SIGNING_ALLOWED=NO build
       - name: Package simulator app

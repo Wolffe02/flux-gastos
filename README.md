@@ -48,6 +48,6 @@ Los workflows de Actions compilan los proyectos con las herramientas oficiales d
 
 - **Android:** Android Studio abre `native/android`; antes de compilar ejecuta `./sync-native-web-assets.sh`. El APK debug se crea con `gradle :app:assembleDebug`.
 - **Windows/macOS:** los binarios locales se crean con PyInstaller y la dependencia `cryptography`.
-- **iOS:** en macOS ejecuta primero `./sync-native-web-assets.sh`, instala Xcode y XcodeGen, y genera el proyecto con `xcodegen generate --spec native/ios/project.yml --project native/ios/Flux.xcodeproj`.
+- **iOS:** en macOS ejecuta primero `./sync-native-web-assets.sh`, instala Xcode y XcodeGen, y genera el proyecto con `xcodegen generate --spec native/ios/project.yml --project native/ios`.
 
 Los paquetes Android y Windows generados por Actions son para instalación directa. Para publicarlos en las tiendas hay que crear las cuentas de desarrollador y firmar los paquetes. La compilación iOS de Actions es para el simulador; distribuirla a iPhone exige una identidad de firma de Apple.
