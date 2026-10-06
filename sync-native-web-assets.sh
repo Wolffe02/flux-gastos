@@ -6,7 +6,7 @@ for target in \
   "$root/native/ios/Flux/public" \
   "$root/native/windows/web"; do
   mkdir -p "$target"
-  cp "$root/index.html" "$root/manifest.webmanifest" "$root/service-worker.js" "$target/"
+  cp "$root/index.html" "$root/app.js" "$root/manifest.webmanifest" "$root/service-worker.js" "$root/privacidad.html" "$root/condiciones.html" "$target/"
   rm -rf "$target/icons"
   cp -a "$root/icons" "$target/icons"
 done

@@ -1,8 +1,11 @@
-const CACHE = 'flux-shell-v1';
+const CACHE = 'flux-shell-v2';
 const FILES = [
   './',
   './index.html',
+  './app.js',
   './manifest.webmanifest',
+  './privacidad.html',
+  './condiciones.html',
   './icons/flux-180.png',
   './icons/flux-192.png',
   './icons/flux-512.png'

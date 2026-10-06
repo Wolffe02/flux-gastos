@@ -6,6 +6,7 @@ import base64
 import datetime as dt
 import hashlib
 import html
+import ipaddress
 import json
 import mimetypes
 import os
@@ -13,6 +14,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import ssl
 import subprocess
 import sys
 import threading
@@ -25,6 +27,8 @@ from pathlib import Path
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 HOST, PORT = "127.0.0.1", 8765
+CALLBACK_HOST, CALLBACK_PORT = "127.0.0.1", 8766
+CALLBACK_URL = f"https://{CALLBACK_HOST}:{CALLBACK_PORT}/callback"
 if os.name == "nt":
     CONFIG_BASE = Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
     DATA_BASE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
@@ -44,9 +48,79 @@ PENDING_STATE: str | None = None
 PENDING_BANK: str | None = None
 
 
+def ensure_callback_certificate():
+    """Create a self-signed TLS certificate for the localhost bank callback."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    server_cert = CONFIG_DIR / "flux-localhost.crt"
+    server_key = CONFIG_DIR / "flux-localhost.key"
+    if all(path.is_file() for path in (server_cert, server_key)):
+        if os.name != "nt":
+            CONFIG_DIR.chmod(0o700)
+            server_cert.chmod(0o600)
+            server_key.chmod(0o600)
+        return server_cert, server_key
+
+    # Packaged desktop builds include cryptography. Linux can also use OpenSSL.
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Flux localhost callback")])
+        now = dt.datetime.now(dt.timezone.utc)
+        certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                .public_key(private_key.public_key()).serial_number(x509.random_serial_number())
+                .not_valid_before_utc(now - dt.timedelta(minutes=5)).not_valid_after_utc(now + dt.timedelta(days=825))
+                .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                .add_extension(x509.SubjectAlternativeName([
+                    x509.DNSName("localhost"),
+                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                    x509.IPAddress(ipaddress.ip_address("::1"))]), critical=False)
+                .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+                .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False,
+                    key_encipherment=True, data_encipherment=False, key_agreement=False,
+                    key_cert_sign=False, crl_sign=False, encipher_only=None, decipher_only=None), critical=True)
+                .sign(private_key, hashes.SHA256()))
+        server_cert.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+        server_key.write_bytes(private_key.private_bytes(serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
+    except ImportError:
+        openssl = shutil.which("openssl")
+        if not openssl:
+            raise RuntimeError("Flux necesita cryptography u OpenSSL para crear el certificado HTTPS local.")
+        ext_file = CONFIG_DIR / ".flux-localhost.ext"
+        ext_file.write_text("[req]\ndistinguished_name=dn\nprompt=no\n[v3_req]\nsubjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n[dn]\nCN=Flux localhost callback\n", encoding="ascii")
+        try:
+            subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(server_key), "-out", str(server_cert), "-days", "825",
+                "-subj", "/CN=Flux localhost callback", "-extensions", "v3_req", "-config", str(ext_file)],
+                check=True, capture_output=True)
+        finally:
+            ext_file.unlink(missing_ok=True)
+
+    if os.name != "nt":
+        CONFIG_DIR.chmod(0o700)
+        for path in (server_cert, server_key):
+            path.chmod(0o600)
+    return server_cert, server_key
+
+
+def start_callback_server():
+    certificate, private_key = ensure_callback_certificate()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate, private_key)
+    server = ThreadingHTTPServer((CALLBACK_HOST, CALLBACK_PORT), Handler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
 def db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, accounts TEXT NOT NULL, expires TEXT)")
     if "bank_name" not in {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}:
@@ -151,35 +225,53 @@ def to_transactions(account_id, response):
 
 
 def import_transactions(session, bank_name="Banco"):
+    session_id = session.get("session_id")
+    accounts = session.get("accounts") or []
+    if not session_id:
+        raise RuntimeError("Enable Banking no devolvió el identificador de la sesión.")
+    if not isinstance(accounts, list) or not accounts:
+        raise RuntimeError("La autorización terminó, pero Enable Banking no devolvió cuentas disponibles.")
+
     conn = db()
     count = 0
-    for account in session.get("accounts", []):
-        if isinstance(account, str):
-            account_id, label = account, account
-        else:
-            account_id = account.get("uid") or account.get("account_id") or account.get("resource_id")
-            label = account.get("name") or account.get("account_name") or account_id
-        if not account_id:
-            continue
-        from_date = (dt.date.today() - dt.timedelta(days=180)).isoformat()
-        continuation = None
-        seen = set()
-        while True:
-            query = {"date_from": from_date, "transaction_status": "BOOK"}
-            if continuation:
-                query["continuation_key"] = continuation
-            page = api("GET", f"/accounts/{urllib.parse.quote(str(account_id), safe='')}/transactions", query=query)
-            for item in to_transactions(str(account_id), page):
-                conn.execute("INSERT OR REPLACE INTO transactions(key,account,date,description,amount,currency,pending) VALUES(:key,:account,:date,:description,:amount,:currency,:pending)", item)
-                count += 1
-            continuation = page.get("continuation_key")
-            if not continuation or continuation in seen:
-                break
-            seen.add(continuation)
-        conn.execute("INSERT OR REPLACE INTO sessions(id, accounts, expires, bank_name) VALUES(?,?,?,?)", (session["session_id"], json.dumps(session.get("accounts_data", session.get("accounts", []))), (session.get("access") or {}).get("valid_until"), bank_name))
+    # Keep the authorized session before downloading transactions. If the bank
+    # API times out during the initial import, the user can retry with Sync.
+    conn.execute("INSERT OR REPLACE INTO sessions(id, accounts, expires, bank_name) VALUES(?,?,?,?)", (
+        session_id,
+        json.dumps(session.get("accounts_data") or accounts),
+        (session.get("access") or {}).get("valid_until"),
+        bank_name,
+    ))
     conn.commit()
-    conn.close()
-    return count
+    try:
+        for account in accounts:
+            if isinstance(account, str):
+                account_id = account
+            elif isinstance(account, dict):
+                account_id = account.get("uid") or account.get("account_id") or account.get("resource_id")
+            else:
+                continue
+            if not account_id:
+                continue
+            from_date = (dt.date.today() - dt.timedelta(days=180)).isoformat()
+            continuation = None
+            seen = set()
+            while True:
+                query = {"date_from": from_date, "transaction_status": "BOOK"}
+                if continuation:
+                    query["continuation_key"] = continuation
+                page = api("GET", f"/accounts/{urllib.parse.quote(str(account_id), safe='')}/transactions", query=query)
+                for item in to_transactions(str(account_id), page):
+                    conn.execute("INSERT OR REPLACE INTO transactions(key,account,date,description,amount,currency,pending) VALUES(:key,:account,:date,:description,:amount,:currency,:pending)", item)
+                    count += 1
+                conn.commit()
+                continuation = page.get("continuation_key")
+                if not continuation or continuation in seen:
+                    break
+                seen.add(continuation)
+        return count
+    finally:
+        conn.close()
 
 
 def recurring_summary():
@@ -232,6 +324,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # never write callback parameters or transaction data to the console
 
+    def valid_host(self):
+        host, port = self.server.server_address[:2]
+        if self.headers.get("Host", "").lower() != f"{host}:{port}".lower():
+            self.send_error(421, "Host local no permitido")
+            return False
+        return True
+
     def send_json(self, status, value):
         payload = json.dumps(value, ensure_ascii=False).encode()
         self.send_response(status)
@@ -242,18 +341,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def read_json(self):
-        length = min(int(self.headers.get("Content-Length", "0")), 20000)
+        length = int(self.headers.get("Content-Length", "0"))
+        if length < 0 or length > 20000:
+            raise ValueError("La solicitud supera el tamaño permitido.")
         return json.loads(self.rfile.read(length) or b"{}")
 
     def do_GET(self):
         global PENDING_STATE, PENDING_BANK
+        if not self.valid_host():
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/status":
             conn = db()
             session = conn.execute("SELECT id,expires,bank_name FROM sessions ORDER BY rowid DESC LIMIT 1").fetchone()
             txn_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
             conn.close()
-            return self.send_json(200, {"configured": config() is not None, "connected": session is not None, "bankName": session["bank_name"] if session else None, "expires": session["expires"] if session else None, "transactionCount": txn_count})
+            return self.send_json(200, {"configured": config() is not None, "connected": session is not None, "bankName": session["bank_name"] if session else None, "expires": session["expires"] if session else None, "transactionCount": txn_count, "callbackUrl": CALLBACK_URL})
         if parsed.path == "/api/banks":
             try:
                 return self.send_json(200, {"items": spanish_banks()})
@@ -288,7 +391,7 @@ class Handler(BaseHTTPRequestHandler):
                 n = import_transactions(session, bank_name or "Banco")
                 return self.page_response("Banco conectado", f"Autorización completada. Se han importado {n} movimientos de {html.escape(bank_name or 'tu banco')}. Ya puedes volver a Flux.")
             except Exception as exc:
-                return self.page_response("No se pudieron importar los movimientos", str(exc))
+                return self.page_response("No se pudieron importar los movimientos", f"La autorización terminó, pero la importación inicial falló. Vuelve a Flux y pulsa Sincronizar para reintentar. Detalle: {exc}")
         path = "/index.html" if parsed.path == "/" else parsed.path
         target = (ROOT / path.lstrip("/")).resolve()
         if not target.is_relative_to(ROOT) or not target.is_file():
@@ -311,6 +414,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global PENDING_STATE, PENDING_BANK
+        if not self.valid_host():
+            return
         origin = self.headers.get("Origin")
         if origin and origin != f"http://{HOST}:{PORT}":
             return self.send_json(403, {"error": "Origen de solicitud no permitido."})
@@ -357,7 +462,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(400, {"error": "El banco ya no aparece disponible. Actualiza la lista e inténtalo de nuevo."})
                 state = secrets.token_urlsafe(32)
                 valid_until = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=80)).replace(microsecond=0).isoformat()
-                body = {"access": {"valid_until": valid_until, "transactions": True}, "aspsp": {"name": bank["name"], "country": bank["country"]}, "state": state, "redirect_url": f"http://{HOST}:{PORT}/callback", "psu_type": "personal", "language": "es"}
+                body = {"access": {"valid_until": valid_until, "transactions": True}, "aspsp": {"name": bank["name"], "country": bank["country"]}, "state": state, "redirect_url": CALLBACK_URL, "psu_type": "personal", "language": "es"}
                 result = api("POST", "/auth", body)
                 with LOCK:
                     PENDING_STATE = state
@@ -429,18 +534,24 @@ def main():
     url = f"http://{HOST}:{PORT}/"
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)
+        callback_server = start_callback_server()
     except OSError as exc:
+        if "server" in locals():
+            server.server_close()
         try:
             with urllib.request.urlopen(url + "api/status", timeout=1) as response:
                 status = json.loads(response.read())
-            if not {"configured", "connected", "transactionCount"}.issubset(status):
-                raise ValueError("El servicio no es una instancia de Flux.")
-            webbrowser.open(url)
-            print("Flux ya estaba abierto; se ha enfocado su panel.")
-            return
         except Exception:
-            raise SystemExit("No se puede iniciar Flux: el puerto 8765 está ocupado. Cierra la app que lo está usando y vuelve a intentarlo.") from exc
+            raise SystemExit("No se puede iniciar Flux: hay otra instancia o servicio usando un puerto local necesario. Cierra la instancia anterior de Flux y vuelve a intentarlo.") from exc
+        if not {"configured", "connected", "transactionCount"}.issubset(status):
+            raise SystemExit("El puerto 8765 está ocupado por otro servicio; ciérralo y vuelve a iniciar Flux.") from exc
+        if status.get("callbackUrl") != CALLBACK_URL:
+            raise SystemExit("Hay una versión anterior de Flux abierta. Ciérrala y vuelve a iniciar Flux para activar el retorno HTTPS.") from exc
+        webbrowser.open(url)
+        print("Flux ya estaba abierto; se ha enfocado su panel.")
+        return
     print("Flux está disponible en", url)
+    print("Añade esta URL de retorno HTTPS a Enable Banking:", CALLBACK_URL)
     threading.Timer(0.7, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
@@ -448,7 +559,14 @@ def main():
         pass
     finally:
         server.server_close()
+        callback_server.shutdown()
+        callback_server.server_close()
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--prepare-callback"]:
+        certificate, _ = ensure_callback_certificate()
+        print("Certificado local creado:", certificate)
+        print("Registra esta URL en Enable Banking:", CALLBACK_URL)
+    else:
+        main()

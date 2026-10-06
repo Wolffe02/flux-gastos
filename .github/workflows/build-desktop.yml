@@ -21,14 +21,20 @@ jobs:
           pyinstaller --noconfirm --onefile --console --name Flux
           --icon flux-icon.ico
           --add-data "index.html;."
+          --add-data "app.js;."
           --add-data "manifest.webmanifest;."
           --add-data "service-worker.js;."
+          --add-data "privacidad.html;."
+          --add-data "condiciones.html;."
           --add-data "icons;icons"
           app.py
       - uses: actions/upload-artifact@v4
         with:
           name: flux-windows
-          path: dist/Flux.exe
+          path: |
+            dist/Flux.exe
+            trust-local-cert.ps1
+            README.md
   macos:
     runs-on: macos-latest
     steps:
@@ -54,12 +60,17 @@ jobs:
         run: >-
           pyinstaller --noconfirm --windowed --name Flux --icon flux.icns
           --add-data 'index.html:.'
+          --add-data 'app.js:.'
           --add-data 'manifest.webmanifest:.'
           --add-data 'service-worker.js:.'
+          --add-data 'privacidad.html:.'
+          --add-data 'condiciones.html:.'
           --add-data 'icons:icons'
           app.py
-      - name: Package app
-        run: cd dist && zip -r "$GITHUB_WORKSPACE/Flux-macOS.zip" Flux.app
+      - name: Package app and certificate helper
+        run: |
+          cp trust-local-cert-macos.sh README.md dist/
+          cd dist && zip -r "$GITHUB_WORKSPACE/Flux-macOS.zip" Flux.app trust-local-cert-macos.sh README.md
       - uses: actions/upload-artifact@v4
         with:
           name: flux-macos

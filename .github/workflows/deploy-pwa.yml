@@ -21,7 +21,7 @@ jobs:
       - name: Prepare site
         run: |
           mkdir -p _site/icons
-          cp index.html manifest.webmanifest service-worker.js privacidad.html condiciones.html _site/
+          cp index.html app.js manifest.webmanifest service-worker.js privacidad.html condiciones.html _site/
           cp icons/flux-180.png icons/flux-192.png icons/flux-512.png _site/icons/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

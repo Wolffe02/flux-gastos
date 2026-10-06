@@ -13,7 +13,7 @@ Flux es una app multiplataforma para organizar gastos mensuales en suscripciones
 - **Aplicación nativa iOS:** el flujo móvil genera una compilación para el simulador de Xcode. Para instalar y distribuir una app nativa en iPhone se requiere firma de Apple; la PWA anterior sí se puede instalar en el iPhone sin esa firma.
 - **Linux, incluido Debian 13:** ejecuta la aplicación local de escritorio. El conector admite los bancos españoles disponibles en Enable Banking.
 
-Las entradas manuales se guardan localmente en cada dispositivo y no se sincronizan entre ellos.
+Flux empieza sin gastos de ejemplo. Las entradas manuales se guardan localmente en cada dispositivo y no se sincronizan entre ellos.
 
 La PWA y las apps nativas Android/iOS sirven para llevar gastos manualmente y guardan los datos en el dispositivo. El acceso bancario local funciona en Debian, Windows y macOS. La conexión directa desde iPhone o Android requiere un servicio alojado seguro y autorización de producción de Enable Banking; el repositorio público no contiene un servicio central ni claves compartidas.
 
@@ -21,7 +21,7 @@ No publiques capturas ni archivos de datos reales.
 
 ## Abrir la aplicación
 
-Desde Debian ejecuta `./run.sh`. Para crear un acceso en el menú de aplicaciones, ejecuta `./install-desktop.sh` una vez. Python 3 está incluido en Debian; OpenSSL permite firmar las peticiones bancarias sin instalar paquetes de Python.
+En Debian, ejecuta `./install-desktop.sh` para instalar una copia independiente en `~/.local/opt/flux-gastos` y crear accesos en el menú y el escritorio. Después abre Flux desde el icono. Para ejecutarlo directamente desde el código, usa `./run.sh`. Python 3 está incluido en Debian; OpenSSL permite firmar las peticiones bancarias sin instalar paquetes de Python.
 
 En **Windows**, descomprime `Flux.exe` desde el artefacto `flux-windows` y ejecútalo. Si ejecutas desde el código, abre PowerShell en la carpeta y ejecuta `./install-windows.ps1`; luego abre `run.bat`. En **macOS**, descomprime `Flux-macOS.zip` y abre `Flux.app`. Desde el código, ejecuta `./install-macos.sh` y luego `./run.sh`.
 
@@ -30,11 +30,12 @@ En **Windows**, descomprime `Flux.exe` desde el artefacto `flux-windows` y ejec�
 La app consulta en tiempo real el catálogo de bancos españoles que Enable Banking ofrece para cuentas personales. La lista puede incluir CaixaBank, BBVA, Santander, Sabadell, Bankinter, Kutxabank, Unicaja y otros; cambia según la disponibilidad del proveedor y la autorización de tu aplicación. Flux vuelve a consultar esa lista cada vez que vas a conectar un banco. Se conecta un banco cada vez; desconéctalo antes de cambiar a otro.
 
 1. Crea una cuenta en el [panel de Enable Banking](https://enablebanking.com/sign-in/) y registra una aplicación **Production** para uso personal.
-2. Añade esta URL de redirección exacta a la aplicación: `http://127.0.0.1:8765/callback`. Es la misma en Debian, Windows y macOS.
-3. Descarga o genera la clave privada RSA y conserva el **Application ID** que te da el panel. No compartas la clave privada ni la subas a la nube.
-4. Activa la aplicación en el modo restringido vinculando las cuentas que utilizarás, siguiendo la opción “Activate by linking accounts” de la [guía oficial](https://enablebanking.com/docs/api/linked-accounts/). El modo restringido limita el acceso a las cuentas que hayas vinculado.
-5. Abre Flux en tu ordenador, pulsa **Configurar acceso** y selecciona el Application ID y el archivo `.pem`. Flux guarda la clave y la configuración dentro del directorio privado de la app en ese dispositivo.
-6. Elige el banco en la lista y pulsa **Conectar banco**. Autoriza solo el acceso de consulta en el flujo oficial del banco. Al volver a la aplicación se importarán los movimientos disponibles de hasta seis meses. Pulsa **Sincronizar** para actualizarlo manualmente.
+2. Inicia Flux una vez para que genere el certificado TLS de `localhost`. La interfaz local sigue abriéndose en `http://127.0.0.1:8765`; el retorno de autorización del banco usa HTTPS en otro puerto. Añade esta URL de redirección exacta a Enable Banking: `https://127.0.0.1:8766/callback`.
+3. Confía el certificado local según tu sistema y reinicia el navegador: en Debian, instala `libnss3-tools` si hace falta y ejecuta `./trust-local-cert.sh install`; en Windows, ejecuta `./trust-local-cert.ps1 install` en PowerShell; en macOS, ejecuta `./trust-local-cert-macos.sh install`. Cada helper lo importa solo en el almacén de tu usuario. Para retirarlo, usa el mismo comando con `remove`.
+4. Descarga o genera la clave privada RSA y conserva el **Application ID** que te da el panel. No compartas la clave privada ni la subas a la nube.
+5. Activa la aplicación en el modo restringido vinculando las cuentas que utilizarás, siguiendo la opción “Activate by linking accounts” de la [guía oficial](https://enablebanking.com/docs/api/linked-accounts/). El modo restringido limita el acceso a las cuentas que hayas vinculado.
+6. Abre Flux en tu ordenador, pulsa **Configurar acceso** y selecciona el Application ID y el archivo `.pem`. Flux guarda la clave y la configuración dentro del directorio privado de la app en ese dispositivo.
+7. Elige el banco en la lista y pulsa **Conectar banco**. Autoriza solo el acceso de consulta en el flujo oficial del banco. Al volver a la aplicación se importarán los movimientos disponibles de hasta seis meses. Pulsa **Sincronizar** para actualizarlo manualmente.
 
 No introduzcas credenciales de acceso bancario en Flux. La autenticación y aprobación se hacen en la página o aplicación oficial de cada banco. Para dejar de compartir datos, pulsa **Desconectar** o revoca el consentimiento desde tu banco. Desconectar también borra la copia local importada.
 
